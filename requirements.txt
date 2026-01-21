@@ -1,6 +1,6 @@
-fastapi==0.119.1
+fastapi==0.124.2
 uvicorn==0.38.0
-pydantic==2.10.6
+pydantic==2.12.5
 python-multipart==0.0.20
 pymongo==4.15.5
 pandas==2.3.1
