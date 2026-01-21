@@ -1,0 +1,12 @@
+fastapi==0.119.1
+uvicorn==0.38.0
+pydantic==2.10.6
+python-multipart==0.0.20
+pymongo==4.15.5
+pandas==2.3.1
+scikit-learn==1.6.1
+plotly==5.24.1
+python-dotenv==1.2.1
+numpy==2.0.0
+joblib==1.4.2
+click==8.2.1
