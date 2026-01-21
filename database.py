@@ -1,6 +1,7 @@
 """
 DATABASE.PY - MongoDB Connection Module
-IMPROVED VERSION - 100% Compatible with your existing code
+UPDATED FOR MongoDB Atlas Connection
+100% Compatible with existing code
 """
 
 from pymongo import MongoClient
@@ -18,10 +19,10 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# MongoDB Configuration with fallbacks
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = os.getenv("DB_NAME", "health_prediction_db")
-COLLECTION_NAME = os.getenv("COLLECTION_NAME", "thyroid_predictions")
+# MongoDB Atlas Configuration from .env
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://alina_31:PROCODER@thyroscan.l8lmmpl.mongodb.net/health_prediction_db?retryWrites=true&w=majority&appName=thyroScan")
+DB_NAME = "health_prediction_db"
+COLLECTION_NAME = "thyroid_predictions"
 
 # Connection objects
 client = None
@@ -30,42 +31,29 @@ predictions_collection = None
 
 # 1. CONNECTION INITIALIZATION WITH ERROR HANDLING
 def initialize_database():
-    """Initialize MongoDB connection with retry logic"""
+    """Initialize MongoDB Atlas connection with retry logic"""
     global client, db, predictions_collection
     
     try:
-        # Multiple connection attempts
-        connection_attempts = [
-            MONGO_URI,
-            "mongodb://localhost:27017",  # Local fallback
-            "mongodb://127.0.0.1:27017"   # Alternative local
-        ]
+        logger.info("🔄 Attempting connection to MongoDB Atlas...")
         
-        for uri in connection_attempts:
-            try:
-                logger.info(f"🔄 Attempting connection to: {uri}")
-                
-                client = MongoClient(
-                    uri,
-                    serverSelectionTimeoutMS=3000,
-                    connectTimeoutMS=5000,
-                    socketTimeoutMS=10000,
-                    maxPoolSize=20,
-                    minPoolSize=5,
-                    retryWrites=True,
-                    retryReads=True
-                )
-                
-                # Test connection
-                client.admin.command('ping')
-                logger.info("✅ MongoDB connection successful!")
-                break
-                
-            except Exception as e:
-                logger.warning(f"⚠️ Connection failed to {uri}: {e}")
-                client = None
-        else:
-            raise ConnectionFailure("All MongoDB connection attempts failed")
+        # Use the MONGO_URI from .env file
+        client = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=5000,  # Increased timeout for Atlas
+            connectTimeoutMS=10000,        # Longer connection timeout
+            socketTimeoutMS=30000,         # Longer socket timeout for Atlas
+            maxPoolSize=50,                # Increased pool size
+            minPoolSize=10,                # Minimum pool size
+            retryWrites=True,
+            retryReads=True,
+            tls=True,                      # Enable TLS for Atlas
+            tlsAllowInvalidCertificates=False  # Strict TLS validation
+        )
+        
+        # Test connection with a ping
+        client.admin.command('ping')
+        logger.info("✅ MongoDB Atlas connection successful!")
         
         # Initialize database and collection
         db = client[DB_NAME]
@@ -78,9 +66,26 @@ def initialize_database():
         return True
         
     except Exception as e:
-        logger.error(f"❌ Database initialization failed: {e}")
-        # Don't raise error - allow application to run in degraded mode
-        return False
+        logger.error(f"❌ MongoDB Atlas connection failed: {e}")
+        logger.info("🔄 Attempting fallback to local MongoDB...")
+        
+        # Fallback to local MongoDB
+        try:
+            client = MongoClient(
+                "mongodb://localhost:27017",
+                serverSelectionTimeoutMS=3000,
+                connectTimeoutMS=5000
+            )
+            client.admin.command('ping')
+            db = client[DB_NAME]
+            predictions_collection = db[COLLECTION_NAME]
+            create_indexes()
+            logger.info("✅ Fallback to local MongoDB successful!")
+            return True
+        except Exception as local_error:
+            logger.error(f"❌ Local MongoDB also failed: {local_error}")
+            # Don't raise error - allow application to run in degraded mode
+            return False
 
 # ✅ 2. INDEX CREATION (PERFORMANCE OPTIMIZATION)
 def create_indexes():
@@ -100,8 +105,15 @@ def create_indexes():
             ("timestamp", -1)
         ])
         
-        # Text index for searching (if needed later)
-        # predictions_collection.create_index([("user_data", "text")])
+        # TTL index for automatic cleanup (optional - 90 days retention)
+        try:
+            predictions_collection.create_index(
+                [("timestamp", 1)], 
+                expireAfterSeconds=90 * 24 * 60 * 60  # 90 days
+            )
+            logger.info("✅ TTL index created for automatic cleanup")
+        except:
+            logger.info("ℹ️ TTL index may already exist")
         
         logger.info("✅ Database indexes created/verified")
         
@@ -163,7 +175,8 @@ def save_prediction(user_data: Dict, prediction_result: str, risk_percentage: fl
             "timestamp": datetime.now(timezone.utc),  # Timezone aware
             "disease_type": "thyroid",
             "created_at": datetime.now(timezone.utc),
-            "version": "1.0"
+            "version": "1.0",
+            "source": "thyroasses_ai"
         }
         
         # Insert into database
@@ -172,7 +185,7 @@ def save_prediction(user_data: Dict, prediction_result: str, risk_percentage: fl
         # Generate readable ID
         prediction_id = str(result.inserted_id)
         
-        logger.info(f"✅ Prediction saved successfully: {prediction_id}")
+        logger.info(f"✅ Prediction saved successfully to MongoDB Atlas: {prediction_id}")
         
         # Also save to fallback for redundancy
         save_to_fallback(user_data, prediction_result, risk_percentage)
@@ -183,7 +196,7 @@ def save_prediction(user_data: Dict, prediction_result: str, risk_percentage: fl
         logger.error(f"❌ Duplicate key error: {e}")
         return "duplicate_error"
     except Exception as e:
-        logger.error(f"❌ Error saving prediction to MongoDB: {e}")
+        logger.error(f"❌ Error saving prediction to MongoDB Atlas: {e}")
         # Fallback to local storage
         return save_to_fallback(user_data, prediction_result, risk_percentage)
 
@@ -215,7 +228,8 @@ def get_prediction_history(limit: int = 20) -> List[Dict]:
                 "risk_percentage": 1,
                 "confidence": 1,
                 "timestamp": 1,
-                "disease_type": 1
+                "disease_type": 1,
+                "source": 1
             }
         ).sort("timestamp", -1).limit(limit)
         
@@ -228,11 +242,11 @@ def get_prediction_history(limit: int = 20) -> List[Dict]:
                 if isinstance(record["timestamp"], datetime):
                     record["timestamp"] = record["timestamp"].strftime("%Y-%m-%d %H:%M:%S")
         
-        logger.info(f"✅ Retrieved {len(history)} prediction records")
+        logger.info(f"✅ Retrieved {len(history)} prediction records from MongoDB Atlas")
         return history
         
     except Exception as e:
-        logger.error(f"❌ Error retrieving history: {e}")
+        logger.error(f"❌ Error retrieving history from MongoDB Atlas: {e}")
         return get_fallback_history(limit)
 
 # ✅ 5. NEW FUNCTION: GET STATISTICS (FOR HISTORY PAGE)
@@ -294,14 +308,15 @@ def get_statistics() -> Dict[str, Any]:
                 "minimum": round(float(stats.get("min_risk", 0)), 2),
                 "maximum": round(float(stats.get("max_risk", 0)), 2)
             },
-            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "database": "mongodb_atlas" if "atlas" in MONGO_URI.lower() else "local"
         }
         
-        logger.info(f"✅ Statistics generated: {total} total predictions")
+        logger.info(f"✅ Statistics generated from MongoDB Atlas: {total} total predictions")
         return statistics
         
     except Exception as e:
-        logger.error(f"❌ Error generating statistics: {e}")
+        logger.error(f"❌ Error generating statistics from MongoDB Atlas: {e}")
         return get_fallback_statistics()
 
 # ✅ 6. FALLBACK FUNCTIONS (FOR WHEN DATABASE IS UNAVAILABLE)
@@ -383,7 +398,8 @@ def get_fallback_statistics() -> Dict[str, Any]:
                 "benign_count": 0,
                 "risk_distribution": {"high": 0, "medium": 0, "low": 0},
                 "risk_stats": {"average": 0, "minimum": 0, "maximum": 0},
-                "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "database": "fallback"
             }
         
         # Calculate statistics
@@ -413,7 +429,8 @@ def get_fallback_statistics() -> Dict[str, Any]:
                 "minimum": round(min(risk_values), 2) if risk_values else 0,
                 "maximum": round(max(risk_values), 2) if risk_values else 0
             },
-            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "database": "fallback"
         }
         
     except Exception as e:
@@ -424,7 +441,8 @@ def get_fallback_statistics() -> Dict[str, Any]:
             "benign_count": 0,
             "risk_distribution": {"high": 0, "medium": 0, "low": 0},
             "risk_stats": {"average": 0, "minimum": 0, "maximum": 0},
-            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "database": "fallback"
         }
 
 # ✅ 7. HELPER FUNCTION (MATCHES YOUR EXISTING CODE)
@@ -468,7 +486,8 @@ def check_database_health() -> Dict[str, Any]:
             return {
                 "status": "disconnected",
                 "message": "Database not connected",
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "database_type": "none"
             }
         
         # Ping database
@@ -477,10 +496,15 @@ def check_database_health() -> Dict[str, Any]:
         # Get collection stats
         stats = predictions_collection.count_documents({})
         
+        # Check if connected to Atlas or local
+        database_type = "mongodb_atlas" if "atlas" in MONGO_URI.lower() else "local_mongodb"
+        
         return {
             "status": "connected",
             "message": "Database is healthy",
             "collection_count": stats,
+            "database_type": database_type,
+            "connection_uri": MONGO_URI[:50] + "..." if len(MONGO_URI) > 50 else MONGO_URI,
             "timestamp": datetime.now().isoformat()
         }
         
@@ -488,15 +512,50 @@ def check_database_health() -> Dict[str, Any]:
         return {
             "status": "error",
             "message": str(e),
+            "database_type": "unknown",
             "timestamp": datetime.now().isoformat()
         }
 
-# ✅ 10. INITIALIZE ON IMPORT (SAFE)
+# ✅ 10. TEST CONNECTION FUNCTION
+def test_connection():
+    """Test MongoDB Atlas connection explicitly"""
+    logger.info("🔍 Testing MongoDB Atlas connection...")
+    logger.info(f"URI: {MONGO_URI[:30]}...")
+    
+    try:
+        # Create a test client
+        test_client = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=5000
+        )
+        
+        # Test the connection
+        test_client.admin.command('ping')
+        
+        # List databases (optional)
+        databases = test_client.list_database_names()
+        
+        logger.info(f"✅ Connection successful!")
+        logger.info(f"✅ Available databases: {databases[:5]}...")  # First 5 databases
+        
+        # Close test client
+        test_client.close()
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Connection test failed: {e}")
+        return False
+
+# ✅ 11. INITIALIZE ON IMPORT (SAFE)
 try:
+    logger.info("🚀 Initializing MongoDB Atlas connection for ThyroAssess AI...")
     # Try to initialize but don't crash if it fails
-    initialize_database()
+    if initialize_database():
+        logger.info("✅ ThyroAssess AI database module ready!")
+    else:
+        logger.warning("⚠️ Database initialization deferred - using fallback mode")
 except Exception as e:
-    logger.warning(f"⚠️ Database initialization deferred: {e}")
+    logger.warning(f"⚠️ Database initialization error: {e}")
     # Application will use fallback mode
 
 # ✅ EXPORT FUNCTIONS (MAINTAIN COMPATIBILITY)
@@ -504,5 +563,7 @@ __all__ = [
     'save_prediction',
     'get_prediction_history',
     'get_statistics',
-    'check_database_health'
+    'check_database_health',
+    'test_connection',
+    'cleanup_old_records'
 ]
